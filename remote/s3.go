@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -432,7 +433,7 @@ func (remote *S3Remote) getFiles(dst, rootKey string, imageKeys keys) error {
 func (remote *S3Remote) getFile(dst string, key *keyDef) error {
 	log.Printf("Pulling key %s (%s)\n", key.key, utils.HumanSize(key.s3Key.Size))
 
-	from, _, err := remote.getUploadDownloadBucket().GetReader(key.key, nil)
+	from, err := remote.getFileDownloadReader(key)
 	if err != nil {
 		return err
 	}
@@ -455,6 +456,23 @@ func (remote *S3Remote) getFile(dst string, key *keyDef) error {
 	}
 
 	return nil
+}
+
+func (remote *S3Remote) getFileDownloadReader(key *keyDef) (from io.ReadCloser, err error) {
+	httpBaseUrl := os.Getenv("DOGESTRY_HTTP_URL")
+	if httpBaseUrl == "" {
+		from, _, err = remote.getUploadDownloadBucket().GetReader(key.key, nil)
+	} else {
+		var resp *http.Response
+		url := httpBaseUrl + "/" + key.key
+		fmt.Printf("Downloading: %s\n", url)
+		resp, err = http.Get(url)
+		if resp != nil {
+			from = resp.Body
+		}
+	}
+
+	return from, err
 }
 
 // path to a tagfile
