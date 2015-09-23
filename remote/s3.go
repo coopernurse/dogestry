@@ -26,7 +26,10 @@ func NewS3Remote(config config.Config) (*S3Remote, error) {
 		return &S3Remote{}, err
 	}
 
-	s3gof3rKeys := s3gof3r.Keys{AccessKey: config.AWS.AccessKeyID, SecretKey: config.AWS.SecretAccessKey}
+	s3gof3rKeys, err := getS3gof3rKeys(config)
+	if err != nil {
+		return &S3Remote{}, err
+	}
 
 	return &S3Remote{
 		config:               config,
@@ -47,6 +50,14 @@ type S3Remote struct {
 var (
 	S3DefaultRegion = "us-east-1"
 )
+
+func getS3gof3rKeys(config config.Config) (s3gof3r.Keys, error) {
+	if config.AWS.UseMetaService {
+		return s3gof3r.InstanceKeys()
+	} else {
+		return s3gof3r.Keys{AccessKey: config.AWS.AccessKeyID, SecretKey: config.AWS.SecretAccessKey}, nil
+	}
+}
 
 // create a new s3 client from the url
 func newS3Client(config config.Config) (*s3.S3, error) {
@@ -127,26 +138,40 @@ func (remote *S3Remote) Push(image, imageRoot string) error {
 	defer close(putFileErrChan)
 
 	numGoroutines := 25
+	goroutineQuitChans := make([]chan bool, numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		goroutineQuitChans[i] = make(chan bool)
+	}
 
 	println("Pushing files to S3 remote:")
 	for i := 0; i < numGoroutines; i++ {
-		go func() {
-			for putFile := range putFilesChan {
-				putFileErr := remote.putFile(putFile.KeyDef.fullPath, &putFile.KeyDef)
+		go func(i int) {
+			select {
+			case <-goroutineQuitChans[i]:
+				return
+			default:
+				for putFile := range putFilesChan {
+					putFileErr := remote.putFile(putFile.KeyDef.fullPath, &putFile.KeyDef)
 
-				if (putFileErr != nil) && ((putFileErr != io.EOF) && (!strings.Contains(putFileErr.Error(), "EOF"))) {
-					putFileErrChan <- putFileResult{putFile.Key, putFileErr}
-					return
+					if (putFileErr != nil) && ((putFileErr != io.EOF) && (!strings.Contains(putFileErr.Error(), "EOF"))) {
+						putFileErrChan <- putFileResult{putFile.Key, putFileErr}
+						return
+					}
+
+					putFileErrChan <- putFileResult{}
 				}
-
-				putFileErrChan <- putFileResult{}
 			}
-		}()
+		}(i)
 	}
 
 	for i := 0; i < len(keysToPush); i++ {
 		p := <-putFileErrChan
 		if p.err != nil {
+			// Close all running goroutines
+			for i := 0; i < numGoroutines; i++ {
+				goroutineQuitChans[i] <- true
+			}
+
 			log.Printf("error when uploading to S3: %v", p.err)
 			return fmt.Errorf("Error when uploading to S3: %v", p.err)
 		}
